@@ -1,0 +1,523 @@
+name: Create App Builds
+on:
+  workflow_call:
+    inputs:
+      APP_ENV:
+        description: Value one of dev, stage, prod or pre-prod
+        required: true
+        type: string
+
+      ENV_FILE:
+        description: Complete .env file
+        required: true
+        type: string
+
+      POST_SLACK:
+        description: Post build to slack?
+        required: false
+        type: boolean
+
+      PUSH_TAG:
+        description: Validate and push tag?
+        required: false
+        default: false
+        type: boolean
+
+      APP_VERSION:
+        description: Version for the release build
+        required: false
+        type: string
+
+      PLATEFORM:
+        description: Target plateform
+        required: true
+        type: string
+
+      IS_RELEASE:
+        description: Build for release?
+        required: false
+        type: boolean
+
+      RELEASE_TYPE:
+        description: Is it a major, minor, patch, current or 'use custom version'
+        type: string
+
+      IS_RELEASE_CANDIDATE:
+        description: Is it a release candidate?
+        type: boolean
+
+    secrets:
+      GH_PAT:
+        required: true
+
+      KEYSTORE_UPLOAD_KEY:
+        required: true
+      KEYSTORE_KEY_ALIAS:
+        required: true
+      KEYSTORE_KEY_PASSWORD:
+        required: true
+      KEYSTORE_STORE_PASSWORD:
+        required: true
+
+      SLACK_WEBHOOK_URL:
+        required: true
+      SLACK_CHANNEL_ID:
+        required: true
+
+env:
+  GH_USER: Flutter Pipeline
+  GH_USER_EAMIL: cowlar.dev@dcarb.com
+  GH_PAT: ${{ secrets.GH_PAT }}
+  KEYSTORE_UPLOAD_KEY: ${{ secrets.KEYSTORE_UPLOAD_KEY }}
+  KEYSTORE_KEY_ALIAS: ${{ secrets.KEYSTORE_KEY_ALIAS }}
+  KEYSTORE_KEY_PASSWORD: ${{ secrets.KEYSTORE_KEY_PASSWORD }}
+  KEYSTORE_STORE_PASSWORD: ${{ secrets.KEYSTORE_STORE_PASSWORD }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+  SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+jobs:
+  build:
+    name: "Build ${{ inputs.PLATEFORM }} | env: ${{ inputs.APP_ENV }} | release: ${{ inputs.IS_RELEASE }}"
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
+        with:
+          token: ${{ env.GH_PAT }}
+          submodules: "recursive"
+
+      - name: Get Current Version from File
+        id: current_version_step
+        run: |
+          version_file="pubspec.yaml"
+
+          # Extract the version from file
+          prev_version=$(grep -m 1 "version:" "$version_file" | sed -E 's/version:\s*([0-9]+\.[0-9]+\.[0-9]+)(\+[0-9]+)?(-rc[0-9]+)?(.*)?/\1\2\3/')
+
+          # On MacOS replace 'version: ' prefix with ''
+          prev_version="${prev_version/"version: "/}"
+
+          echo "Current Version: $prev_version"
+
+          echo "CURRENT_VERSION=$prev_version" >> $GITHUB_ENV
+          echo "VERSION_FILE=$version_file" >> $GITHUB_ENV
+
+      - name: Validate Provided Version
+        id: version_step
+        run: |
+          extract_version_components() {                                                                                                  
+            local version_string="$1"
+
+            # Regular expression pattern to extract version components
+            local pattern="^([0-9]+)\.([0-9]+)\.([0-9]+)\+([0-9]+)(-rc[0-9]+)?$"
+
+            if [[ $version_string =~ $pattern ]]; then
+              local major="${BASH_REMATCH[1]}"
+              local minor="${BASH_REMATCH[2]}"
+              local patch="${BASH_REMATCH[3]}"
+              local build_number="${BASH_REMATCH[4]}"
+              local rc="${BASH_REMATCH[5]}"
+
+              # Remove 'rc' prefix if it exists
+              rc="${rc/"rc"/""}"
+
+              # Return the extracted components as an array
+              echo "$major $minor $patch $build_number ${rc:1}"
+            else
+              echo "Invalid version string: $version_string"
+              exit 1
+            fi
+          }
+
+          tag_version=${GITHUB_REF#refs/tags/}
+          input_version=${{ inputs.APP_VERSION }} 
+
+          # if version is provided in input, use it
+          if [ -n "$input_version" ]; then
+             app_version=$input_version
+
+          # Get version from tag
+          elif [[ "${{ github.ref_type }}" == "tag" && "${{ github.ref }}" == "refs/tags/"* ]]; then
+              app_version=$tag_version
+
+          elif [[ "${{ inputs.RELEASE_TYPE }}" == "current" ]]; then
+              app_version=${{ env.CURRENT_VERSION }}
+              
+          else
+              app_version='0.0.1+1'
+          fi
+
+          # validate version and get components
+          echo APP_VERSION_COMPONENTS=$(extract_version_components "$app_version") >> $GITHUB_ENV
+
+          # get current version components
+          echo CURRENT_VERSION_COMPONENTS=$(extract_version_components "${{ env.CURRENT_VERSION }}") >> $GITHUB_ENV
+
+          # make the variable accessible throughout the workflow
+          echo "APP_VERSION=$app_version" >> $GITHUB_ENV
+          echo "BUILD_NUMBER=$build_number" >> $GITHUB_ENV
+
+          echo "====== Workflow inputs ======"
+          echo "    APP_ENV | ${{ inputs.APP_ENV }}"
+          echo " IN_VERSION | ${{ inputs.APP_VERSION }}"
+          echo " IS_RELEASE | ${{ inputs.IS_RELEASE }}"
+          echo "  PLATEFORM | ${{ inputs.PLATEFORM }}"
+          echo "====== Workflow outputs ======"
+          echo "NEW_VERSION | $app_version"
+
+      - name: Validate Tag, Delete If Not Valid
+        id: tag_validate_step
+        if: steps.version_step.conclusion == 'success' && startsWith(github.ref, 'refs/tags/') && github.ref_type == 'tag'
+        run: |
+          delete_git_tag() {
+            local tag_name="${1}"
+            git tag -d "${tag_name}"
+            git push origin ":${tag_name}"
+          }
+
+          # Extract the tag version from the environment variable
+          tag_version=${GITHUB_REF#refs/tags/}
+          tag_version_components="${{ env.APP_VERSION_COMPONENTS }}"
+          tag_release_type=""
+
+          current_version=${{ env.CURRENT_VERSION }}
+          current_version_components="${{ env.CURRENT_VERSION_COMPONENTS }}"
+
+          # tag version components
+          read -r tag_major tag_minor tag_patch tag_build_number tag_rc <<< "$tag_version_components"
+
+          # current version components
+          read -r current_major current_minor current_patch current_build_number current_rc <<< "$current_version_components"
+
+          if [[ -n "$tag_build_number" && "$tag_build_number" != $((current_build_number + 1)) ]]; then
+            echo "Build number is not valid in tag version: '$tag_version'."
+            echo "Expected it to be '$((current_build_number + 1))'. Deleting tag..."
+            echo "Either push tag with correct build number, or ommit build number in tag"
+            delete_git_tag "$tag_version"
+            
+            exit 31
+          fi
+
+          # Check if tag version is greater by 1 in any component of current version
+          if [ $tag_major -eq $((current_major + 1)) ] && [ $tag_minor -eq 0 ] && [ $tag_patch -eq 0 ]; then
+            tag_release_type="major"
+
+          elif [ "$tag_major" -eq "$current_major" ] && [ "$tag_minor" -eq "$((current_minor + 1))" ] && [ "$tag_patch" -eq 0 ]; then
+            tag_release_type="minor"
+
+          elif [ "$tag_major" -eq "$current_major" ] && [ "$tag_minor" -eq "$current_minor" ] && [ "$tag_patch" -eq "$((current_patch + 1))" ]; then
+            tag_release_type="patch"
+
+          else
+            echo "Tag version is not greater by 1 in any component when compared with current version: '$current_version'"
+            echo "Or '$tag_version' may not be in valid format."
+            echo "Tag: '$tag_version' is invalid. Deleting tag..."
+
+            delete_git_tag "$tag_version"
+
+            exit 3
+          fi
+
+          echo "TAG_RELEASE_TYPE=$tag_release_type" >> $GITHUB_ENV
+
+          echo "Tag: '$tag_version' pushed for '$tag_release_type' release"
+
+      - name: Generate Semantic App Version
+        id: semantic_version_validate_step
+        run: |
+          release_type="${{ inputs.RELEASE_TYPE }}"
+          tag_release_type="${{ env.TAG_RELEASE_TYPE }}"
+
+          if [ -n "$tag_release_type" ]; then
+            release_type=$tag_release_type
+          fi
+
+          release_candidate=${{ inputs.IS_RELEASE_CANDIDATE }}
+          version_file=${{ env.VERSION_FILE }}
+          prev_version=${{ env.CURRENT_VERSION }}
+
+          build_number=0
+          use_test_version=false
+
+          read -r major minor patch build_number rc <<< "${{ env.CURRENT_VERSION_COMPONENTS }}"
+
+          case "$release_type" in
+            "major")
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            "minor")
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            "patch")
+              patch=$((patch + 1))
+              ;;
+            "current")
+              # Use current version from version file
+              ;;
+            "use test version")
+               use_test_version=true
+              ;;
+            *)
+              echo "Invalid version type: '$1'. Valid type is major, minor, patch, current or 'use test version'"
+              exit 4
+              ;;
+          esac
+
+          if [ "$release_candidate" = true ]; then
+
+            # if existing release is rc, then increment rc count
+            if [ -n "$rc" ] && [ "$release_type" = "current" ]; then
+              rc="$((rc + 1))"
+
+            elif [ "$release_type" != "current" ]; then
+              rc="1"
+
+            else
+              echo "Cannot mark an existing non-rc release as a release candidate (rc)."
+              exit 6
+            fi
+          else
+            rc=""
+          fi
+
+          if [[ "$release_type" != "current" ]]; then
+            build_number=$((build_number + 1))
+          fi
+
+          just_new_version="$major.$minor.$patch"
+          new_version="$just_new_version+$build_number"
+
+          if [ -n "$rc" ]; then
+            new_version="$new_version-rc$rc"
+          fi
+
+          if [ "$use_test_version" = true ]; then
+            new_version=${{ env.APP_VERSION }}
+            echo "Using test version: $new_version"
+          else
+
+            if [[ "$version" != "$just_new_version" ]]; then
+              echo "Versions are distinct, to be updated in file: $new_version"
+              echo "UPDATE_FILE=true" >> $GITHUB_ENV
+
+            else
+              echo "Versions are identical. File update will skip."
+              echo "UPDATE_FILE=false" >> $GITHUB_ENV
+            fi
+          fi
+
+          echo "------------------------------"
+          echo "Version File: $version_file"
+          echo "-------------+----------------"
+          echo " Old Version | $prev_version"
+          echo " New Version | $new_version"
+          echo "-------------+----------------"
+          echo "Build Number | $build_number"
+          echo "   RC Number | $rc"
+          echo "-------------+----------------"
+          echo "Release Type | $release_type"
+
+          echo "APP_VERSION=$just_new_version" >> $GITHUB_ENV
+          echo "APP_BUILD_VERSION=$new_version" >> $GITHUB_ENV
+
+          echo "BUILD_NUMBER=$build_number" >> $GITHUB_ENV
+          echo "VERSION_FILE=$version_file" >> $GITHUB_ENV
+
+      - name: Update Version File
+        run: |
+          if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+            # Linux system
+            sed_command="sed -i"
+
+          elif [[ "$OSTYPE" == "darwin"* ]]; then
+            # macOS system
+            sed_command="sed -i.bak"
+
+          else
+            echo "Unsupported operating system: $OSTYPE"
+            exit 5
+          fi
+
+          new_version=${{ env.APP_BUILD_VERSION }}
+          prev_version=${{ env.CURRENT_VERSION }}
+          version_file=${{ env.VERSION_FILE }}
+          update_file=${{ env.UPDATE_FILE }}
+
+          if [[ "$update_file" == "true" ]]; then
+            # Replace the version in the file using the appropriate sed command
+            $sed_command "s/^version: $prev_version$/version: $new_version/" "$version_file"
+
+            echo "Version updated in file: $new_version"
+          else
+            echo "No file update happened"
+          fi
+
+      - name: Get Repository name
+        run: |
+          # Get the repository name from the github environment variable
+          REPO_NAME=${{ github.repository }}
+
+          # Check if the repository name contains a slash '/'
+          if [[ "$REPO_NAME" == *"/"* ]]; then
+            # Split the repository name on the slash '/'
+            IFS='/' read -ra array <<< "$REPO_NAME"
+            # Get the last element of the array
+            REPO_NAME=${array[1]}
+          fi
+
+          # Print the repository name to the console
+          echo "Repository name is $REPO_NAME"
+
+          # make the variable accessible throughout the workflow
+          echo "REPO_NAME=${REPO_NAME}" >> $GITHUB_ENV
+
+      - name: Create .env File
+        run: |
+          echo "${{ inputs.ENV_FILE  }}" >> .env
+
+          # Overwrite APP_ENV
+          echo "APP_ENV=${{ inputs.APP_ENV  }}" >> .env
+
+        # moved these here to get faster feedback of above scripts
+      - name: Set up JDK 11
+        if: contains(inputs.PLATEFORM, 'apk') || contains(inputs.PLATEFORM, 'appbundle')
+        uses: actions/setup-java@3f07048e3d294f56e9b90ac5ea2c6f74e9ad0f98
+        with:
+          java-version: 11
+          distribution: temurin
+          cache: "gradle"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.7.6"
+          channel: "stable"
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Android Signing Setup
+        if: inputs.IS_RELEASE == true && (contains(inputs.PLATEFORM, 'apk') || contains(inputs.PLATEFORM, 'appbundle')) && steps.version_step.conclusion == 'success'
+        run: |
+          echo "${{ env.KEYSTORE_UPLOAD_KEY }}" | base64 --decode > app/upload-keystore.jks
+
+          echo "keyAlias=${{ env.KEYSTORE_KEY_ALIAS }}" >> key.properties
+          echo "storePassword=${{ env.KEYSTORE_STORE_PASSWORD }}" >> key.properties
+          echo "keyPassword=${{ env.KEYSTORE_KEY_PASSWORD }}" >> key.properties
+          echo "storeFile=upload-keystore.jks" >> key.properties
+        working-directory: android
+
+        # If build step fails all the steps following it would fail, we will run this step only if version is valid
+      - name: Run build ${{ inputs.PLATEFORM }}
+        # Version is required either custom or semantically generated
+        if: steps.semantic_version_validate_step.conclusion == 'success' || (github.ref_type == 'tag' && steps.tag_validate_step == 'success')
+        run: |
+          if [[ "${{ inputs.IS_RELEASE }}" == "true" ]]; then
+            flutter build ${{ inputs.PLATEFORM }} --release --build-name=${{ env.APP_VERSION }} --build-number=${{ env.BUILD_NUMBER }}
+          else
+            flutter build ${{ inputs.PLATEFORM }} --debug --build-name=${{ env.APP_VERSION }} --build-number=${{ env.BUILD_NUMBER }}
+          fi
+
+        # Get android build
+      - name: Get and Rename APK
+        if: (contains(inputs.PLATEFORM, 'apk') || contains(inputs.PLATEFORM, 'appbundle'))
+        run: |
+          if [[ "${{ inputs.IS_RELEASE }}" == "true" ]]; then
+            if [[ "${{ inputs.PLATEFORM }}" == "appbundle" ]]; then
+              mv build/app/outputs/bundle/release/app-release.aab app-release-${{ env.APP_VERSION }}.aab
+            else
+              apk_name="${{ env.REPO_NAME }}-${{ github.run_id }}-release-${{ env.APP_VERSION }}+${{env.BUILD_NUMBER}}-${{ inputs.APP_ENV }}.apk"
+              mv build/app/outputs/apk/release/app-release.apk $apk_name
+            fi
+          else
+            mv build/app/outputs/flutter-apk/app-debug.apk app-debug.apk
+          fi
+
+      # Commit changes if build is successful
+      - name: Commit Changes in Version File & Push Tag
+        if: inputs.PUSH_TAG == true && (steps.tag_validate_step.conclusion == 'success' || steps.semantic_version_validate_step.conclusion == 'success') && ${{ env.UPDATE_FILE }} == true
+        run: |
+          echo "if ${{inputs.PUSH_TAG == true && (steps.tag_validate_step.conclusion == 'success' || steps.semantic_version_validate_step.conclusion == 'success') &&  env.UPDATE_FILE  == true}}"
+           git config user.name "${{ env.GH_USER }}"
+           git config user.email "${{ env.GH_USER_EAMIL }}"
+
+           version=${{ env.APP_BUILD_VERSION }}
+
+           if git rev-parse "$version" >/dev/null 2>&1; then
+             git tag -d "$version"
+             git push origin ":${version}"
+             echo "Tag $version deleted. Pipeline will update it"
+           fi
+
+           git add ${{ env.VERSION_FILE }}
+           git commit -m "[ci/cd build]: $version - id: ${{ github.run_id }}"
+           git push
+
+           if [[ $version == *"rc"* ]]; then
+             echo "Can not push tag on release candidate: '$version'. Skipped tag push"
+           else
+             git tag -a $version -m "v$version" 
+             git push origin $version
+
+             echo "Pushed tag: $version"
+           fi
+
+      - name: Download APK
+        if: contains(inputs.PLATEFORM, 'apk')
+        uses: actions/upload-artifact@v3
+        with:
+          name: Android Build (${{ inputs.APP_ENV }})
+          path: "*.apk"
+
+      - name: Download AAB
+        if: contains(inputs.PLATEFORM, 'appbundle')
+        uses: actions/upload-artifact@v3
+        with:
+          name: Android Build (${{ inputs.APP_ENV }})
+          path: "*.aab"
+
+        # Get ios build
+      - name: Rename Runnuer.app
+        if: contains(inputs.PLATEFORM, 'ios')
+        run: mv build/ios/iphone/Runner.app Runner-${{ env.APP_VERSION }}.app
+
+      - name: Download Runner.app
+        if: contains(inputs.PLATEFORM, 'ios')
+        uses: actions/upload-artifact@v3
+        with:
+          name: IOS Build (${{ inputs.APP_ENV }})
+          path: "*.app"
+
+      - name: Send Slack notification
+        if: inputs.POST_SLACK == true
+        uses: slackapi/slack-github-action@v1.23.0
+        with:
+          channel-id: "${{ env.SLACK_CHANNEL_ID }}"
+          payload: |
+            {
+                "blocks": [
+                    {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "Build triggered by *${{ github.triggering_actor }}*"
+                    }
+                  }
+                ],
+                "attachments": [
+                    {
+                      "pretext": "Latest (${{inputs.PLATEFORM}}) build for `${{ github.repository }}`",
+                      "color": "28a745",
+                      "fields": [
+                          {
+                            "title": "Use below link to download",
+                            "short": true,
+                            "value": "*<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|${{ env.APP_VERSION }}+${{ env.BUILD_NUMBER }} (${{ inputs.APP_ENV }})>*"
+                          }
+                      ]
+                    }
+                ]
+            }

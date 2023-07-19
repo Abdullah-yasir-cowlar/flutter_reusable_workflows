@@ -1,0 +1,28 @@
+name: 1. Lint, Format, Test & Build
+on:
+  push:
+    branches: [ 'main' ]
+jobs:
+  lint-format-test:
+    uses: veetech-ai/fc-kiosk-app/.github/workflows/flutter.yml@main
+    secrets:
+      GH_PAT: ${{ secrets.GITHUB_TOKEN }}
+
+  build-dev:
+    needs: lint-format-test
+    uses: veetech-ai/fc-kiosk-app/.github/workflows/flutter-build.yml@main
+    with:
+      APP_ENV: dev
+      ENV_FILE: ${{ vars.ENV_FILE }}
+      APP_VERSION: 'v0.0.0+1'
+      PLATEFORM: 'apk --debug'
+      IS_RELEASE: false
+      POST_SLACK: false
+    secrets:
+      GH_PAT: ${{ secrets.GITHUB_TOKEN }}
+      KEYSTORE_UPLOAD_KEY: ${{ secrets.KEYSTORE_UPLOAD_KEY }}
+      KEYSTORE_KEY_ALIAS: ${{ secrets.KEYSTORE_KEY_ALIAS }}
+      KEYSTORE_KEY_PASSWORD: ${{ secrets.KEYSTORE_KEY_PASSWORD }}
+      KEYSTORE_STORE_PASSWORD: ${{ secrets.KEYSTORE_STORE_PASSWORD }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}

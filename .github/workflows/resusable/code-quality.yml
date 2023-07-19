@@ -1,0 +1,87 @@
+name: Lint and Test
+on:
+  # To be able to call this workflow from another workflow
+  workflow_call:
+    secrets:
+      GH_PAT:
+        required: true
+    inputs:
+      ENV_FILE:
+        description: Complete .env file
+        type: string
+
+jobs:
+  lint:
+    name: Check for syntax errors and code style
+    runs-on: ubuntu-latest
+    env:
+      GH_PAT: ${{ secrets.GH_PAT }}
+    steps:
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.7.6'
+          channel: 'stable'
+          cache: true
+
+      - name: Checkout code
+        uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
+        with:
+          token: ${{ env.GH_PAT }}
+          submodules: 'recursive'
+
+      - run: flutter pub get
+
+      - name: Create .env file
+        run: echo "" >> .env
+
+      - name: Lint check
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Ensure the Dart code is formatted correctly
+        run: dart format --set-exit-if-changed .
+
+  unit-test:
+    name: Unit Tests
+    needs: lint
+    runs-on: ubuntu-latest
+    env:
+      GH_PAT: ${{ secrets.GH_PAT }}
+    steps:
+      # Set up Flutter.
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.7.6'
+          channel: 'stable'
+          cache: true
+
+      - name: Checkout code
+        uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
+        with:
+          token: ${{ env.GH_PAT }}
+          submodules: 'recursive'
+
+      - name: Cache `pub` dependencies
+        uses: actions/cache@v2
+        with:
+          path: $HOME/.pub-cache
+          key: ${{ runner.os }}-pub-cache-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pub-cache-
+
+      - run: flutter pub get
+
+      - name: Create .env file
+        run: echo "${{ inputs.ENV_FILE }}" >> .env
+
+      - name: Run Tests and Get coverage
+        run: flutter test --coverage
+
+      - name: Generage coverage report
+        run: |
+          sudo apt-get update
+          sudo apt-get install lcov
+
+          lcov --summary coverage/lcov.info
+          genhtml coverage/lcov.info --output=coverage

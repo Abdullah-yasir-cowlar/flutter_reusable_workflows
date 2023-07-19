@@ -1,0 +1,128 @@
+name: Deploy on Stores
+on:
+  workflow_call:
+    inputs:
+      APP_VERSION:
+        description: Version of new build (x.x.x) without 'v'
+        required: false
+        type: string
+      APP_BUILD_NUMBER:
+        description: Build number for Android
+        required: false
+        type: number
+      APP_ENV:
+        description: Value one of dev, stage, prod or pre-prod
+        required: true
+        type: string
+      ANDROID_LANE:
+        type: string
+        description: Fastlane lane for android
+      DEPLOY_ON:
+        type: string
+        description: Deploy on app stores
+      ENV_FILE:
+        type: string
+        description: Complete env file
+
+    secrets:
+      GH_PAT:
+        required: true
+
+      KEYSTORE_UPLOAD_KEY:
+        required: true
+      KEYSTORE_KEY_ALIAS:
+        required: true
+      KEYSTORE_KEY_PASSWORD:
+        required: true
+      KEYSTORE_STORE_PASSWORD:
+        required: true
+
+      PLAY_STORE_CONFIG_JSON:
+        required: true
+
+jobs:
+  fastlane-deploy:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && ( inputs.DEPLOY_ON == 'google_play' || inputs.DEPLOY_ON == 'both_stores' )
+    env:
+      GH_PAT: ${{ secrets.GH_PAT }}
+    steps:
+      # Set up Flutter.
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.7.6"
+          channel: "stable"
+          cache: true
+
+      # Checkout gallery code and get packages.
+      - name: Checkout code
+        uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
+        with:
+          token: ${{ env.GH_PAT }}
+          submodules: "recursive"
+
+      - name: Create .env File
+        run: |
+          echo "APP_ENV: ${{ inputs.APP_ENV  }}" >> .env
+          echo "${{ inputs.ENV_FILE  }}" >> .env
+
+      - run: flutter pub get
+
+      - name: Get App Version
+        run: |
+          TAG_VERSION=${GITHUB_REF#refs/tags/}
+          INPUT_VERSION=${{ inputs.APP_VERSION }} 
+
+          # if version is provided in input, use it
+          if [ -n "$INPUT_VERSION" ]; then
+             APP_VERSION=${INPUT_VERSION}
+          else
+            # Get version from tag
+            if [ ! -z ${{ github.ref }} ]; then
+               APP_VERSION=${TAG_VERSION}
+            else
+               APP_VERSION=v0.0.0
+            fi
+          fi
+
+          # validate version
+          if [[ "${APP_VERSION}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version is valid"
+          else
+           echo "Version is not valid, resetting to v0.0.0"
+           APP_VERSION=v0.0.0
+          fi
+
+          echo "APP_VERSION=${APP_VERSION}" >> $GITHUB_ENV
+          echo "APP_BUILD_NUMBER=${{ inputs.APP_BUILD_NUMBER }}" >> $GITHUB_ENV
+
+        # Setup Ruby, Bundler, and Gemfile dependencies
+      - name: Setup Fastlane
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.0"
+          bundler-cache: true
+          working-directory: android
+
+      - name: Configure Keystore
+        run: |
+          echo "${{ env.KEYSTORE_UPLOAD_KEY }}" | base64 --decode > app/upload-keystore.jks
+
+          echo "keyAlias=${{ env.KEYSTORE_KEY_ALIAS }}" >> key.properties
+          echo "storePassword=${{ env.KEYSTORE_STORE_PASSWORD }}" >> key.properties
+          echo "keyPassword=${{ env.KEYSTORE_KEY_PASSWORD }}" >> key.properties
+          echo "storeFile=upload-keystore.jks" >> key.properties
+        env:
+          KEYSTORE_UPLOAD_KEY: ${{ secrets.KEYSTORE_UPLOAD_KEY }}
+          KEYSTORE_KEY_ALIAS: ${{ secrets.KEYSTORE_KEY_ALIAS }}
+          KEYSTORE_KEY_PASSWORD: ${{ secrets.KEYSTORE_KEY_PASSWORD }}
+          KEYSTORE_STORE_PASSWORD: ${{ secrets.KEYSTORE_STORE_PASSWORD }}
+        working-directory: android
+
+      # Build and deploy with Fastlane (by default, to beta track) 🚀.
+      # Naturally, promote_to_production only deploys.
+      - run: bundle exec fastlane ${{ inputs.ANDROID_LANE || 'beta' }}
+        env:
+          PLAY_STORE_CONFIG_JSON: ${{ secrets.PLAY_STORE_CONFIG_JSON }}
+        working-directory: android

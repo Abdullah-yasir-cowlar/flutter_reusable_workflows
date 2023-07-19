@@ -1,0 +1,61 @@
+name: 2. Create App Builds Manually
+run-name: App Build ${{ inputs.plateform }} ${{ inputs.version }} (${{ inputs.stage }}) | release ${{ inputs.release }} | slack ${{ inputs.post-slack }}
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Build Version (v#.#.#+#)
+        required: false
+        type: string
+
+      stage:
+        description: Environment
+        required: false
+        default: stage
+        type: choice
+        options:
+          - dev
+          - stage
+          - all
+
+      plateform:
+        description: Target plateform
+        required: false
+        default: apk
+        type: choice
+        options:
+          - apk
+          - appbundle
+          - ios --no-codesign
+          - ipa
+
+      release:
+        description: Build for release
+        default: false
+        type: boolean
+
+      post-slack:
+        description: Post release on slack
+        default: false
+        type: boolean
+
+jobs:
+
+  build-stage:
+    if: github.event.inputs.stage == 'stage' || github.event.inputs.stage == 'all'
+    uses: veetech-ai/fc-kiosk-app/.github/workflows/flutter-build.yml@main
+    with:
+      APP_ENV: stage
+      ENV_FILE: ${{ vars.ENV_FILE }}
+      APP_VERSION: ${{ inputs.version }}
+      PLATEFORM: ${{ inputs.plateform }}
+      IS_RELEASE: ${{ inputs.release }}
+      POST_SLACK: ${{ inputs.post-slack }}
+    secrets:
+      GH_PAT: ${{ secrets.GITHUB_TOKEN }}
+      KEYSTORE_UPLOAD_KEY: ${{ secrets.KEYSTORE_UPLOAD_KEY }}
+      KEYSTORE_KEY_ALIAS: ${{ secrets.KEYSTORE_KEY_ALIAS }}
+      KEYSTORE_KEY_PASSWORD: ${{ secrets.KEYSTORE_KEY_PASSWORD }}
+      KEYSTORE_STORE_PASSWORD: ${{ secrets.KEYSTORE_STORE_PASSWORD }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}

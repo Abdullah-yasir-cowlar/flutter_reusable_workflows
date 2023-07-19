@@ -1,0 +1,10 @@
+name: 1. Lint, Format, Test & Build
+on:
+  pull_request:
+    branches: [ 'main' ]
+
+jobs:
+  lint-format-test:
+    uses: veetech-ai/fc-kiosk-app/.github/workflows/flutter.yml@main
+    secrets:
+      GH_PAT: ${{ secrets.GITHUB_TOKEN  }}
